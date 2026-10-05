@@ -186,6 +186,34 @@ test("open_workspace reports aggregate review availability", async (t) => {
   assert.deepEqual(gitReview, { available: true });
 });
 
+test("open_workspace minimal mode skips bootstrap and eager review without changing the default path", async (t) => {
+  const context = await fixture(t, { git: true });
+
+  const minimal = await context.client.callTool({
+    name: "open_workspace",
+    arguments: { path: context.project, context_mode: "minimal" },
+  });
+  const minimalStructured = structuredContent(minimal);
+  assert.deepEqual(minimalStructured.review, {
+    available: false,
+    reason: "Review checkpoints are not initialized in minimal context mode.",
+  });
+  assert.equal(minimalStructured.agents_files, undefined);
+  assert.equal(minimalStructured.available_agents_files, undefined);
+  assert.equal(minimalStructured.skills, undefined);
+  assert.equal(minimalStructured.agent_providers, undefined);
+  assert.equal(minimalStructured.agents, undefined);
+  assert.equal(minimalStructured.skill_diagnostics, undefined);
+
+  const full = structuredContent(await callOpen(context.client, context.project, "full-default"));
+  assert.deepEqual(full.review, { available: true });
+  assert.ok(Array.isArray(full.agents_files));
+  assert.ok(Array.isArray(full.available_agents_files));
+  assert.ok(Array.isArray(full.skills));
+  assert.ok(Array.isArray(full.agent_providers));
+  assert.ok(Array.isArray(full.agents));
+});
+
 test("show_changes reviews an unborn repository through the MCP tool surface", async (t) => {
   const context = await fixture(t, { uiEnabled: false });
   await git(context.project, ["init"]);

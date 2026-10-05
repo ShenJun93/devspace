@@ -404,6 +404,12 @@ function registerMcpSurface(
           .string()
           .optional()
           .describe("Git ref to base a worktree on. Only used with mode=\"worktree\". Defaults to HEAD."),
+        context_mode: z
+          .enum(["full", "minimal"])
+          .optional()
+          .describe(
+            "Defaults to full. Use minimal only for integration callers that need a workspace handle without skills, agent profiles, instruction discovery, or an eager review checkpoint.",
+          ),
       },
       outputSchema: {
         workspace_id: z.string(),
@@ -438,9 +444,10 @@ function registerMcpSurface(
       ...workspaceAppDescriptorMeta(config),
       annotations: { readOnlyHint: true },
     },
-    async ({ path, mode, base_ref }, { _meta }) => {
+    async ({ path, mode, base_ref, context_mode }, { _meta }) => {
       const startedAt = performance.now();
       const baseRef = base_ref;
+      const contextMode = context_mode;
       const {
         workspace,
         agentsFiles,
@@ -448,14 +455,19 @@ function registerMcpSurface(
         workspaceReused,
         includeBootstrapContext,
       } = await workspaces.openWorkspace(
-        { path, mode, baseRef },
+        { path, mode, baseRef, contextMode },
         { conversationScopeId: conversationScopeIdFromRequestMeta(_meta) },
       );
-      const review = await reviewCheckpoints.initializeWorkspace({
-        workspaceId: workspace.id,
-        root: workspace.root,
-      });
-      const preloadSubagents = config.subagents.enabled
+      const minimalContext = contextMode === "minimal";
+      // Minimal integration callers need only an executable workspace handle. Review checkpoints
+      // build a Git snapshot and are initialized lazily by show_changes if that tool is used.
+      const review = minimalContext
+        ? { available: false as const, reason: "Review checkpoints are not initialized in minimal context mode." }
+        : await reviewCheckpoints.initializeWorkspace({
+            workspaceId: workspace.id,
+            root: workspace.root,
+          });
+      const preloadSubagents = !minimalContext && config.subagents.enabled
         && config.subagents.instructions === "preload";
       const subagentsSkill = workspace.skills.find((skill) => skill.name === "subagents");
       const preloadedSubagentInstructions = preloadSubagents && subagentsSkill
@@ -469,11 +481,13 @@ function registerMcpSurface(
           description: skill.description,
           path: formatPathForPrompt(skill.filePath),
         }));
-      const agentCatalog = buildLocalAgentCatalog(
-        config.subagents,
-        workspace.agentProfiles,
-        resolveLocalAgentProviders(),
-      );
+      const agentCatalog = minimalContext
+        ? { providers: [], profiles: [] }
+        : buildLocalAgentCatalog(
+            config.subagents,
+            workspace.agentProfiles,
+            resolveLocalAgentProviders(),
+          );
       const cardAgentProviders = agentCatalog.providers
         .filter((provider) => provider.usable)
         .map((provider) => ({

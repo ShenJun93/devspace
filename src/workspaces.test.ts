@@ -439,6 +439,26 @@ test("a symlinked allowed root preserves checkout and worktree path behavior", {
   );
 });
 
+test("a minimal checkout skips bootstrap discovery but remains usable", async (t) => {
+  const context = await fixture(t);
+  const opened = await context.registry.openWorkspace({
+    path: context.root,
+    contextMode: "minimal",
+  });
+
+  assert.match(opened.workspace.id, /^ws_[a-f0-9]{10}$/);
+  assert.equal(opened.workspace.root, context.root);
+  assert.equal(opened.workspace.canonicalRoot, await realpath(context.root));
+  assert.equal(opened.workspace.mode, "checkout");
+  assert.deepEqual(opened.workspace.skills, []);
+  assert.deepEqual(opened.workspace.skillDiagnostics, []);
+  assert.deepEqual(opened.workspace.agentProfiles, []);
+  assert.deepEqual(opened.agentsFiles, []);
+  assert.deepEqual(opened.availableAgentsFiles, []);
+  assert.equal(opened.includeBootstrapContext, false);
+  assert.equal((await context.registry.getWorkspace(opened.workspace.id)).id, opened.workspace.id);
+});
+
 interface WorkspaceFixture {
   root: string;
   outsideRoot: string;

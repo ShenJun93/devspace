@@ -85,6 +85,7 @@ export interface OpenWorkspaceInput {
   path: string;
   mode?: WorkspaceMode;
   baseRef?: string;
+  contextMode?: "full" | "minimal";
 }
 
 export interface OpenWorkspaceOptions {
@@ -125,11 +126,15 @@ export class WorkspaceRegistry {
     const projectKey = await this.conversationProjectKey(workspaceInput);
     const mode = workspaceInput.mode ?? "checkout";
     if (mode === "worktree") {
-      const context = await this.openWorktreeWorkspace(workspaceInput.path, workspaceInput.baseRef);
+      const context = await this.openWorktreeWorkspace(
+        workspaceInput.path,
+        workspaceInput.baseRef,
+        workspaceInput.contextMode,
+      );
       return {
         ...context,
-        // A new worktree always has its own workspace-specific context.
-        includeBootstrapContext: true,
+        // A new worktree normally has its own workspace-specific bootstrap context.
+        includeBootstrapContext: workspaceInput.contextMode !== "minimal",
       };
     }
 
@@ -165,10 +170,10 @@ export class WorkspaceRegistry {
     const mode = options.mode ?? "checkout";
 
     if (mode === "worktree") {
-      return this.openWorktreeWorkspace(options.path, options.baseRef);
+      return this.openWorktreeWorkspace(options.path, options.baseRef, options.contextMode);
     }
 
-    return this.openCheckoutWorkspace(options.path);
+    return this.openCheckoutWorkspace(options.path, options.contextMode);
   }
 
   private async openConversationCheckout(
@@ -181,7 +186,10 @@ export class WorkspaceRegistry {
       const reusableWorkspace = await this.findReusableCheckoutWorkspace(binding);
 
       if (reusableWorkspace) {
-        const context = await this.reusedWorkspaceContext(reusableWorkspace);
+        const context = await this.reusedWorkspaceContext(
+          reusableWorkspace,
+          input.contextMode,
+        );
         this.store?.touchConversationBinding(conversationScopeId, targetKey);
         return {
           ...context,
@@ -193,7 +201,7 @@ export class WorkspaceRegistry {
       this.store?.deleteConversationBinding(conversationScopeId, targetKey);
     }
 
-    const context = await this.openCheckoutWorkspace(input.path);
+    const context = await this.openCheckoutWorkspace(input.path, input.contextMode);
     this.store?.setConversationBinding({
       conversationScopeId,
       targetKey,
@@ -201,7 +209,7 @@ export class WorkspaceRegistry {
     });
     return {
       ...context,
-      includeBootstrapContext: true,
+      includeBootstrapContext: input.contextMode !== "minimal",
     };
   }
 
@@ -243,7 +251,20 @@ export class WorkspaceRegistry {
     return JSON.stringify(["checkout", projectKey, null]);
   }
 
-  private async reusedWorkspaceContext(workspace: Workspace): Promise<WorkspaceContext> {
+  private async reusedWorkspaceContext(
+    workspace: Workspace,
+    contextMode: OpenWorkspaceInput["contextMode"] = "full",
+  ): Promise<WorkspaceContext> {
+    if (contextMode === "minimal") {
+      return {
+        workspace,
+        agentsFiles: [],
+        availableAgentsFiles: [],
+        workspaceReused: true,
+        includeBootstrapContext: false,
+      };
+    }
+
     workspace.agentProfiles = await loadLocalAgentProfiles(this.config, workspace.root);
     const agentsFiles = await this.loadInitialAgentsFiles(workspace.root);
     const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
@@ -440,7 +461,10 @@ export class WorkspaceRegistry {
     return workingDirectory ? this.resolvePath(workspace, workingDirectory) : workspace.root;
   }
 
-  private async openCheckoutWorkspace(path: string): Promise<WorkspaceContext> {
+  private async openCheckoutWorkspace(
+    path: string,
+    contextMode: OpenWorkspaceInput["contextMode"] = "full",
+  ): Promise<WorkspaceContext> {
     const root = assertAllowedPath(path, this.config.allowedRoots);
     const canonicalRoot = await resolveCanonicalAllowedPath(
       root,
@@ -452,10 +476,14 @@ export class WorkspaceRegistry {
       throw new Error(`Workspace root must be a directory: ${path}`);
     }
 
-    return this.createWorkspaceContext({ root, canonicalRoot, mode: "checkout" });
+    return this.createWorkspaceContext({ root, canonicalRoot, mode: "checkout" }, contextMode);
   }
 
-  private async openWorktreeWorkspace(path: string, baseRef: string | undefined): Promise<WorkspaceContext> {
+  private async openWorktreeWorkspace(
+    path: string,
+    baseRef: string | undefined,
+    contextMode: OpenWorkspaceInput["contextMode"] = "full",
+  ): Promise<WorkspaceContext> {
     const worktree = await createManagedWorktree({
       sourcePath: path,
       baseRef,
@@ -478,16 +506,20 @@ export class WorkspaceRegistry {
       mode: "worktree",
       sourceRoot: worktree.sourceRoot,
       worktree,
-    });
+    }, contextMode);
   }
 
-  private async createWorkspaceContext(input: {
-    root: string;
-    canonicalRoot: string;
-    mode: WorkspaceMode;
-    sourceRoot?: string;
-    worktree?: WorkspaceWorktree;
-  }): Promise<WorkspaceContext> {
+  private async createWorkspaceContext(
+    input: {
+      root: string;
+      canonicalRoot: string;
+      mode: WorkspaceMode;
+      sourceRoot?: string;
+      worktree?: WorkspaceWorktree;
+    },
+    contextMode: OpenWorkspaceInput["contextMode"] = "full",
+  ): Promise<WorkspaceContext> {
+    const minimal = contextMode === "minimal";
     const workspace: Workspace = {
       id: `ws_${randomBytes(5).toString("hex")}`,
       root: input.root,
@@ -495,8 +527,10 @@ export class WorkspaceRegistry {
       mode: input.mode,
       sourceRoot: input.sourceRoot,
       worktree: input.worktree,
-      ...this.loadSkillsForWorkspace(input.root),
-      agentProfiles: await loadLocalAgentProfiles(this.config, input.root),
+      ...(minimal
+        ? { skills: [], skillDiagnostics: [] }
+        : this.loadSkillsForWorkspace(input.root)),
+      agentProfiles: minimal ? [] : await loadLocalAgentProfiles(this.config, input.root),
     };
 
     this.store?.createSession({
@@ -509,15 +543,17 @@ export class WorkspaceRegistry {
       managed: workspace.worktree?.managed,
     });
     this.rememberWorkspace(workspace);
-    const agentsFiles = await this.loadInitialAgentsFiles(workspace.root);
-    const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
+    const agentsFiles = minimal ? [] : await this.loadInitialAgentsFiles(workspace.root);
+    const availableAgentsFiles = minimal
+      ? []
+      : await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
 
     return {
       workspace,
       agentsFiles,
       availableAgentsFiles,
       workspaceReused: false,
-      includeBootstrapContext: true,
+      includeBootstrapContext: !minimal,
     };
   }
 
